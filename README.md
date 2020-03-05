@@ -10,5 +10,7 @@ Relies on being executed by cron or other job timing daemons in a regularfashion
 
 
 How to use:
+
   srv_sync [path_to_config]    Uses the config file to set parameters like log file, PID files and job config file to use
+  
   srv_sync [--help|-h|help]    Display this help.
