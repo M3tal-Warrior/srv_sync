@@ -1,0 +1,13 @@
+# srv_sync working hours and jobs
+
+# First column:   Start on this day of week (1-7), 1 is monday, 7 is sunday;
+#                 ranges (2-5), lists (2,3,6) and wildcard (*) allowed
+# Second column:  Starting time; format HH:MM:SS
+# Third column:   End time; format HH:MM:SS
+# Fourth column:  Source (may be a SSH location
+# Fifth column:   Destination (may be a SSH location)
+
+
+* 22:00:00 06:00:00 /home/user/Documents /srv/backup/user/
+2,4 12:30:00 13:00:00 /srv/data/Documents/ user@foo.bar:/srv/backup/
+1-6 00:00:00 02:00:00 user@foo.bar:share /home/user/share

@@ -1,0 +1,337 @@
+#!/bin/bash
+
+# srv_sync
+# Syncs directories between servers
+# One can add a config file as parameter 1 to use it for system jobs or change
+# variables herein
+
+# ================================= Copyright =================================
+# Version 0.1.1 (2019-05-09), Copyright (C) 2019
+# Author: Metal_Warrior (metalwarrior@poly-tick.de)
+
+#   This program is free software: you can redistribute it and/or modify it 
+#   under the terms of the GNU General Public License as published by the 
+#   Free Software Foundation, either version 3 of the License, or any later 
+#   version.
+#   This Program is distributed in the hope that it will be useful, but 
+#   WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY 
+#   or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License 
+#   for more details.
+
+#   You should have received a copy of the GNU General Public License
+#   along with this program. If not, see <http://www.gnu.org/licenses/>.
+#   See <http://www.gnu.org/licenses/> for the licence text.
+
+
+# ================================= Variables =================================
+# Jobs config file
+SS_JOBS="/home/$USER/.srv_sync/srv_sync.jobs"
+
+# Log files
+SS_SYNCLOG="/home/$USER/.srv_sync/xfer.log"
+LMBA_LOG="home/$USER/.srv_sync/run.log"
+
+# PID file template (will get the worked on config statement index added)
+SS_PIDFILE="/home/$USER/.srv_sync/pid"
+
+# File which hosts the job indexes finished successfully, so they won't be
+# started again until their next scheduled timeframe
+SS_FINFILE="home/$USER/.srv_sync/finished.work"
+
+# Source libraries
+SS_LMBA="/usr/local/lib/libbash-mw/libbash-mw-basic"
+SS_LMTI="/usr/local/lib/libbash-mw/libbash-mw-time"
+
+
+# ================================= Functions =================================
+
+# Check if the current line is to be worked on
+ss_checkline() {
+  # Ignore comments and empty lines
+  if echo "$1" | grep -E "^(\s*$|\s*#)" > /dev/null
+    then
+      return 1
+  fi
+  # As this is now considered a valid line, we count the index
+  SS_INDEX=$(( SS_INDEX + 1 ))
+  # Set PID file name for this config line
+  LMBA_PIDFILE="$SS_PIDFILE.$SS_INDEX"
+  
+  # Get first column
+  SS_DOW=`echo "$LINE" | cut -d " " -f 1 -s`
+  # Set wildcard to todays date
+  if [ "$SS_DOW" = "*" ]
+    then
+      SS_DOW="$SS_TODAY"
+  fi
+  # Test if it's a range or a list
+  if echo "$SS_DOW" | grep -E "^[1-7](-[1-7]|(,[1-7])+)" > /dev/null
+    then
+      # Test if today fits the pattern
+      # In case of lists it also searches for commata, but there's no way
+      # they'll ever occur in SS_TODAY
+      if echo "$SS_TODAY" | grep -E "[$SS_DOW]" > /dev/null
+        then
+          # Yes, set todays date
+          SS_DOW="$SS_TODAY"
+        else
+          # It doesn't
+          SS_DOW="0"
+      fi
+  fi
+  # Check if today's a lucky day
+  if [ "$SS_DOW" != "$SS_TODAY" ]
+    then
+      # No, sorry. Delete the finfile entry and proceed to next line
+      ss_finfile del
+      return 1
+  fi
+  
+  # Now get the configured times
+  SS_START=`echo "$LINE" | cut -d " " -f 2 -s`
+  SS_END=`echo "$LINE" | cut -d " " -f 3 -s`
+  # Let's check if we're in the configured time frame
+  if ! lmti_nowin "$SS_START" "$SS_END"
+    then
+      # No, we're outside. Delete the finfile entry and proceed.
+      ss_finfile del
+      return 1
+  fi
+  
+  # Get source and destination
+  SS_SRC=`echo "$LINE" | cut -d " " -f 4 -s`
+  SS_DEST=`echo "$LINE" | cut -d " " -f 5 -s`
+  return 0
+}
+
+# Sets, checks or deletes a finfile entry
+ss_finfile() {
+  case "$1" in
+    check)
+      # Check if the file exists
+      if [ ! -f "$SS_FINFILE" ]
+        then
+          # If the file does not exist, there is no entry
+          return 1
+      fi
+      # Probe for an index entry in the finfile
+      if grep -E "^$SS_INDEX$" "$SS_FINFILE" > /dev/null
+        then
+          return 0
+        else
+          return 1
+      fi
+      ;;
+    del)
+      # Check if the file exists
+      if [ ! -f "$SS_FINFILE" ]
+        then
+          # If the file does not exist, nothing needs to be deleted
+          return 0
+      fi
+      # Delete the index entry from the finfile
+      if sed -i "/^$SS_INDEX$/d" "$SS_FINFILE" > /dev/null
+        then
+          return 0
+        else
+          return 1
+      fi
+      ;;
+    set)
+      # Add the index number to the finfile
+      echo "$SS_INDEX" >> "$SS_FINFILE"
+      if [ "$?" = "0" ]
+        then
+          return 0
+        else
+          return 1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Help function
+ss_help() {
+  echo -e "################################ srv_sync help ################################"
+  echo -e "Synchronizes directories within two systems in a timed manner"
+  echo -e "Relies on being executed by cron or other job timing daemons in a regular\nfashion, like every 5 minutes."
+  echo -e "\nHow to use:"
+  echo -e "  srv_sync [path_to_config]\n    Uses the config file to set parameters like log file, PID files and\n    job config file to use"
+  echo -e "  srv_sync [--help|-h|help]\n    Display this help."
+  echo -e "\n\nWritten by Metal_Warrior (2019)"
+}
+
+# Synchronizer
+ss_sync() {
+  # Takes source as parameter 1, destination as parameter 2 and max duration
+  # in minutes as parameter 3
+  # Checking parameters
+  if [ "$1" = "" -o "$2" = "" ]
+    then
+      lmba_logger "Source and/or destination for job $SS_INDEX missing."
+      return 1
+  fi
+  if ! echo "$3" | grep -E "^[0-9]+$" > /dev/null
+    then
+      lmba_logger "Remaining time missing or wrong format."
+      return 1
+  fi
+  # Synchronization
+  if rsync -ahu --partial --delete --time-limit="$3" "$1" "$2" >> "$SS_SYNCLOG" 2>&1
+    then
+      lmba_logger "Synchronization of job $SS_INDEX ended successful."
+      return 0
+    else
+      lmba_logger "Synchronization of job $SS_INDEX ended with exit code $?"
+      return 1
+  fi
+}
+
+
+# =============================== Prerequisites ===============================
+# Set variables
+SS_RETURN=""
+SS_INDEX="0"
+SS_TODAY=`date +%u`
+
+# Source libraries
+if [ -f "$SS_LMBA" ]
+  then
+    . "$SS_LMBA"
+  else
+    echo "libbash-mw-basic missing!"
+    exit 1
+fi
+if [ -f "$SS_LMTI" ]
+  then
+    . "$SS_LMTI"
+  else
+    echo "libbash-mw-time missing!"
+    exit 1
+fi
+
+# Set dynamic library variables
+# Fetching own PID
+LMBA_MYPID="$$"
+
+# Probe for user config and/or interactive use
+if [ "$1" != "" ]
+  then
+    if [ -f "$1" ]
+      then
+        . "$1"
+      else
+        # Implement help
+        case "$1" in
+          -h)
+            ss_help
+            ;;
+          --help)
+            ss_help
+            ;;
+          help)
+            ss_help
+            ;;
+          *)
+            mkdir -p $(dirname "$LMBA_LOG")
+            lmba_logger "Custom config not found, using defaults."
+            ;;
+        esac
+    fi
+fi
+
+# Create directories, if necessary
+mkdir -p $(dirname "$SS_JOBS")
+mkdir -p $(dirname "$SS_SYNCLOG")
+mkdir -p $(dirname "$LMBA_LOG")
+mkdir -p $(dirname "$SS_PIDFILE")
+mkdir -p $(dirname "$SS_FINFILE")
+
+# Probe for job config
+if [ ! -f "$SS_JOBS" ]
+  then
+    lmba_logger "Job config $SS_JOBS missing!"
+    exit 1
+fi
+
+
+# =================================== Main ====================================
+# Main stuff
+
+# Read config
+while read -u 3 LINE
+  do
+    # Check if the line describes a valid job at the moment
+    if ! ss_checkline "$LINE" > /dev/null
+      then
+        continue
+    # Check if the index number is marked as finished for the current run
+    elif ss_finfile check > /dev/null
+      then
+        continue
+      else
+        # Set the index number as finished, as we will do that now
+        ss_finfile set
+    fi
+
+    # Set PID
+    if ! lmba_pidfile set
+      then
+        # File belongs to a running process or couldn't be set
+        continue
+    fi
+    
+    # Since we're having to deal with potential network issues, we loop that
+    while true
+      do
+        # Calculate the remaining time to the end (will be in LMTI_TIME)
+        if ! lmti_duration "`date +%T`" "$SS_END" "minutes"
+          then
+            # Something went wrong, kill the loop
+            break
+        fi
+        # Check if there's time left
+        if [ "$LMTI_TIME" = "0" ]
+          then
+            # No time left, don't continue
+            break
+        elif [ "$LMTI_TIME" = "1440" ]
+          then
+            # Race condition - we just broke the time frame
+            break
+        fi
+        lmba_logger "Starting job $SS_INDEX..."
+        # let's sync!
+        if ss_sync "$SS_SRC" "$SS_DEST" "$LMTI_TIME"
+          then
+            # Synchronization ended successful, time's over!
+            break
+        fi
+        # Here we only land if synchronization returned an error. 
+        # Wash, rinse, repeat after some time
+        sleep 10
+        # We have to check the time frame again, for next loop instance
+        if ! lmti_nowin "$SS_START" "$SS_END"
+          then
+            # No, we're outside.
+            break
+        fi
+      done
+    lmba_logger "Finished job $SS_INDEX for today."
+
+    # Delete the PID file
+    if ! lmba_pidfile delete
+      then
+        lmba_logger "Could not delete $LMBA_PIDFILE!"
+        # Push that info out tou STDOUT and exit on error
+        echo "Could not delete $LMBA_PIDFILE!"
+        exit 1
+    fi    
+  done 3< "$SS_JOBS" 
+
+# This is reached when the config was walked through and we got nothing left
+# to do
+exit 0
